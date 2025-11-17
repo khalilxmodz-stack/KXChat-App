@@ -67,6 +67,82 @@ app.get("/online-users", (req, res) => {
 });
 
 // =======================
+// REST API for KXChat (HTTP endpoints for Sketchware)
+// =======================
+
+// تسجيل حساب جديد عبر HTTP
+app.post("/api/register", (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: "missing_fields" });
+  }
+  if (users[username]) {
+    return res.status(400).json({ success: false, error: "user_exists" });
+  }
+
+  users[username] = { password, socketId: null, online: false };
+  console.log("HTTP: user registered", username);
+  return res.json({ success: true });
+});
+
+// تسجيل الدخول عبر HTTP
+app.post("/api/login", (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: "missing_fields" });
+  }
+  const user = users[username];
+  if (!user) {
+    return res.status(404).json({ success: false, error: "user_not_found" });
+  }
+  if (user.password !== password) {
+    return res.status(401).json({ success: false, error: "wrong_password" });
+  }
+
+  // HTTP login فقط للتحقق من البيانات، ربط الـ socket يتم في حدث socket "login"
+  return res.json({ success: true, username, online: user.online });
+});
+
+// إرسال رسالة عبر HTTP
+app.post("/api/send-message", (req, res) => {
+  const { from, to, text } = req.body || {};
+  if (!from || !to || !text) {
+    return res.status(400).json({ success: false, error: "missing_fields" });
+  }
+  if (!users[from] || !users[to]) {
+    return res.status(404).json({ success: false, error: "user_not_found" });
+  }
+
+  const time = Math.floor(Date.now() / 1000);
+  messages.push({ from, to, text, time });
+
+  // إرسال عبر سوكيت لو المستقبل أونلاين
+  if (users[to].socketId) {
+    io.to(users[to].socketId).emit("new_message", { from, to, text, time });
+  }
+  if (users[from].socketId) {
+    io.to(users[from].socketId).emit("new_message", { from, to, text, time });
+  }
+
+  return res.json({ success: true });
+});
+
+// جلب سجل المحادثة بين شخصين
+app.get("/api/chat-history", (req, res) => {
+  const { user1, user2 } = req.query;
+  if (!user1 || !user2) {
+    return res.status(400).json({ success: false, error: "missing_fields" });
+  }
+
+  const chat = messages.filter(m =>
+    (m.from === user1 && m.to === user2) ||
+    (m.from === user2 && m.to === user1)
+  );
+
+  return res.json({ success: true, chat });
+});
+
+// =======================
 // Socket.io Events
 // =======================
 
@@ -74,7 +150,7 @@ io.on("connection", (socket) => {
   console.log("🔌 Socket connected:", socket.id);
 
   // -------------------
-  // تسجيل مستخدم جديد
+  // تسجيل مستخدم جديد عبر Socket
   // data: { username, password }
   // -------------------
   socket.on("register", (data, callback) => {
@@ -97,12 +173,12 @@ io.on("connection", (socket) => {
       online: false
     };
 
-    console.log(`🆕 User registered: ${username}`);
+    console.log(`🆕 User registered (socket): ${username}`);
     if (callback) callback({ success: true });
   });
 
   // -------------------
-  // تسجيل الدخول
+  // تسجيل الدخول عبر Socket
   // data: { username, password }
   // -------------------
   socket.on("login", (data, callback) => {
@@ -129,7 +205,7 @@ io.on("connection", (socket) => {
     user.online = true;
     socket.data.username = username; // نخزن الاسم في socket
 
-    console.log(`✅ User logged in: ${username} (socket: ${socket.id})`);
+    console.log(`✅ User logged in (socket): ${username} (socket: ${socket.id})`);
 
     // إرسال حالة أونلاين لباقي المستخدمين
     io.emit("user_status", {
@@ -147,7 +223,7 @@ io.on("connection", (socket) => {
   });
 
   // -------------------
-  // رسالة خاصة بين مستخدمين
+  // رسالة خاصة بين مستخدمين عبر Socket
   // data: { from, to, text }
   // -------------------
   socket.on("private_message", (data, callback) => {
@@ -175,12 +251,14 @@ io.on("connection", (socket) => {
     console.log(`✉️ ${from} -> ${to}: ${text}`);
 
     // إرسال الرسالة للمرسل (حتى يضيفها في شات نفسه)
-    io.to(users[from].socketId).emit("new_message", {
-      from,
-      to,
-      text,
-      time
-    });
+    if (users[from].socketId) {
+      io.to(users[from].socketId).emit("new_message", {
+        from,
+        to,
+        text,
+        time
+      });
+    }
 
     // إرسال الرسالة للمستقبل لو أونلاين
     if (users[to].socketId) {
@@ -196,7 +274,7 @@ io.on("connection", (socket) => {
   });
 
   // -------------------
-  // طلب محادثة مع شخص (جلب الرسائل القديمة بين شخصين)
+  // طلب محادثة مع شخص (جلب الرسائل القديمة بين شخصين) عبر Socket
   // data: { user1, user2 }
   // -------------------
   socket.on("get_chat_history", (data, callback) => {
